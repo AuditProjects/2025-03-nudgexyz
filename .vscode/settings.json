@@ -6,5 +6,10 @@
     "editor.defaultFormatter": "tamasfe.even-better-toml"
   },
   "npm.exclude": "**/lib/**",
-  "solidity.formatter": "forge"
+"solidity.formatter": "forge",
+"editor.tokenColorCustomizations": {
+    "comments": "",
+    "textMateRules": []
+},
+"inline-bookmarks.view.showVisibleFilesOnly": false
 }

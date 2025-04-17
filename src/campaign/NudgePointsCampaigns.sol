@@ -10,6 +10,7 @@ import "./interfaces/INudgeCampaignFactory.sol";
 
 /// @title NudgePointsCampaigns
 /// @notice Manages points-based campaigns where users can reallocate their tokens and earn points as rewards
+// 一个网络只有一个合约,由 nudge 团队管理,所以不需要 Factory
 contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
     using SafeERC20 for IERC20;
 
@@ -23,6 +24,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
     mapping(uint256 => bool) public isCampaignPaused;
 
     // Participations
+    // 因为只有一个合约,所以要记录所有 Participation
     mapping(uint256 campaign => mapping(uint256 pID => Participation)) public participations;
 
     /// @notice Initializes the contract with required roles
@@ -47,6 +49,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
     /// @param targetToken Address of the token users need to hold
     /// @return Campaign memory The newly created campaign
     /// @dev Only callable by NUDGE_ADMIN_ROLE
+    // 只能由 admin 调用创建
     function createPointsCampaign(
         uint256 campaignId,
         uint32 holdingPeriodInSeconds,
@@ -56,19 +59,20 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
             revert InvalidTargetToken();
         }
 
-        if (campaigns[campaignId].targetToken != address(0)) {
+        if (campaigns[campaignId].targetToken != address(0)) { // 查空
             revert CampaignAlreadyExists();
         }
 
         Campaign memory campaign = Campaign({
             holdingPeriodInSeconds: holdingPeriodInSeconds,
             targetToken: targetToken,
-            pID: 0,
-            totalReallocatedAmount: 0
+            pID: 0, // @q-a 为什么是 0 - Campaign 内部ID , 从 0 开始
+            totalReallocatedAmount: 0 
         });
 
         campaigns[campaignId] = campaign;
 
+        // 链下可以捕获事件
         emit PointsCampaignCreated(campaignId, holdingPeriodInSeconds, targetToken);
         return campaign;
     }
@@ -100,6 +104,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
                 revert CampaignAlreadyExists();
             }
 
+            // @q-a 为何没有开始结束时间 - 链下进行
             Campaign memory campaign = Campaign({
                 holdingPeriodInSeconds: holdingPeriods[i],
                 targetToken: targetTokens[i],
@@ -109,7 +114,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
 
             campaigns[campaignIds[i]] = campaign;
             newCampaigns[i] = campaign;
-
+            // 
             emit PointsCampaignCreated(campaignIds[i], holdingPeriods[i], targetTokens[i]);
         }
 
@@ -130,6 +135,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
         uint256 toAmount,
         bytes calldata data
     ) external payable whenNotPaused(campaignId) onlyRole(SWAP_CALLER_ROLE) {
+        // @q-a 如果campaignId不存在? 后续会 revert
         Campaign storage campaign = campaigns[campaignId];
 
         if (toToken != campaign.targetToken) {
@@ -145,7 +151,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
             }
 
             IERC20 tokenReceived = IERC20(toToken);
-            uint256 balanceOfSender = tokenReceived.balanceOf(msg.sender);
+            uint256 balanceOfSender = tokenReceived.balanceOf(msg.sender); // 调用者 SWAP_CALLER_ROLE 当前所有余额
             uint256 balanceBefore = getBalanceOfSelf(toToken);
 
             SafeERC20.safeTransferFrom(tokenReceived, msg.sender, address(this), balanceOfSender);
@@ -156,24 +162,27 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
         if (amountReceived < toAmount) {
             revert InsufficientAmountReceived();
         }
-
+        // @q-a reentrancy? - has auth
         _transfer(toToken, userAddress, amountReceived);
 
+        // 活动累计金额
         campaign.totalReallocatedAmount += amountReceived;
-
+        // pID +1
         uint256 newpID = ++campaign.pID;
 
         // Store the participation details
+        // 链上只新建 Participation
         participations[campaignId][newpID] = Participation({
             status: ParticipationStatus.HANDLED_OFFCHAIN,
             userAddress: userAddress,
             toAmount: amountReceived,
-            rewardAmount: 0,
+            rewardAmount: 0,  // @q-a why 0 - off-chain
             startTimestamp: block.timestamp,
             startBlockNumber: block.number
         });
 
         // entitledRewards & fees set to 0 since users only earn points
+        // 后端获取事件, 后续服务链下进行
         emit NewParticipation(campaignId, userAddress, newpID, amountReceived, 0, 0, data);
     }
 
@@ -234,6 +243,7 @@ contract NudgePointsCampaigns is INudgePointsCampaign, AccessControl {
     /// @dev Handles both ERC20 and native token transfers
     function _transfer(address token, address to, uint256 amount) internal {
         if (token == NATIVE_TOKEN) {
+            // @q-a 不判断合约是否有 amount 够转? - 外部进行了判断
             (bool sent, ) = to.call{value: amount}("");
             if (!sent) revert NativeTokenTransferFailed();
         } else {

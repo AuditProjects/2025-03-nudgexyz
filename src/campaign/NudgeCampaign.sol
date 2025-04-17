@@ -11,12 +11,13 @@ import "./interfaces/INudgeCampaignFactory.sol";
 
 /// @title NudgeCampaign
 /// @notice A contract for managing Nudge campaigns with token rewards
+// 普通用户都可以通过 Factory 进行部署
 contract NudgeCampaign is INudgeCampaign, AccessControl {
     using Math for uint256;
     using SafeERC20 for IERC20;
 
     // Role granted to the entity which is running the campaign and managing the rewards
-    bytes32 public constant CAMPAIGN_ADMIN_ROLE = keccak256("CAMPAIGN_ADMIN_ROLE");
+    bytes32 public constant CAMPAIGN_ADMIN_ROLE = keccak256("CAMPAIGN_ADMIN_ROLE"); // 每个 campaign 的 admin
     uint256 private constant BPS_DENOMINATOR = 10_000;
     // Denominator in parts per quadrillion
     uint256 private constant PPQ_DENOMINATOR = 1e15;
@@ -34,14 +35,14 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     uint256 public immutable startTimestamp;
     address public immutable alternativeWithdrawalAddress;
     // Fee parameter in basis points (1000 = 10%)
-    uint16 public feeBps;
+    uint16 public feeBps; // BPS 分子
     bool public isCampaignActive;
     // Unique identifier for this campaign
     uint256 public immutable campaignId;
 
     // Scaling factors for 18 decimal normalization
-    uint256 public immutable targetScalingFactor;
-    uint256 public immutable rewardScalingFactor;
+    uint256 public immutable targetScalingFactor; // @q-a 计算作用? - 用来修正小数位
+    uint256 public immutable rewardScalingFactor; // 同上
 
     // Campaign State
     uint256 public pID;
@@ -53,6 +54,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     bool private _manuallyDeactivated;
 
     // Participations
+    // 一个 campaign 里有若干 participations?
     mapping(uint256 pID => Participation) public participations;
 
     /// @notice Creates a new campaign with specified parameters
@@ -73,7 +75,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
         uint256 rewardPPQ_,
         address campaignAdmin,
         uint256 startTimestamp_,
-        uint16 feeBps_,
+        uint16 feeBps_, // Factory 固定是 1000
         address alternativeWithdrawalAddress_,
         uint256 campaignId_
     ) {
@@ -84,7 +86,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
         if (startTimestamp_ != 0 && startTimestamp_ <= block.timestamp) {
             revert InvalidCampaignSettings();
         }
-
+        // 由 Factory 部署
         factory = INudgeCampaignFactory(msg.sender);
 
         targetToken = targetToken_;
@@ -96,7 +98,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
         uint256 rewardDecimals = rewardToken_ == NATIVE_TOKEN ? 18 : IERC20Metadata(rewardToken_).decimals();
 
         // Calculate scaling factors to normalize to 18 decimals
-        targetScalingFactor = 10 ** (18 - targetDecimals);
+        targetScalingFactor = 10 ** (18 - targetDecimals); // 如果没有修正 则为 10 ** 0 = 1
         rewardScalingFactor = 10 ** (18 - rewardDecimals);
 
         _grantRole(CAMPAIGN_ADMIN_ROLE, campaignAdmin);
@@ -115,6 +117,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
 
     /// @notice Ensures the campaign is not paused
     modifier whenNotPaused() {
+        // 由外部地址状态进行 check
         if (factory.isCampaignPaused(address(this))) revert CampaignPaused();
         _;
     }
@@ -138,20 +141,22 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     /// @notice Calculates the total reward amount (including platform fees) based on target token amount
     /// @param toAmount Amount of target tokens to calculate rewards for
     /// @return Total reward amount including platform fees, scaled to reward token decimals
+    // @f-a calc logic
+    // 按比例获取 reward
     function getRewardAmountIncludingFees(uint256 toAmount) public view returns (uint256) {
         // If both tokens have 18 decimals, no scaling needed
-        if (targetScalingFactor == 1 && rewardScalingFactor == 1) {
-            return toAmount.mulDiv(rewardPPQ, PPQ_DENOMINATOR);
+        if (targetScalingFactor == 1 && rewardScalingFactor == 1) { // 没有缩放
+            return toAmount.mulDiv(rewardPPQ, PPQ_DENOMINATOR); // toAmount * rewardPPQ / PPQ_DENOMINATOR 
         }
 
         // Scale amount to 18 decimals for reward calculation
-        uint256 scaledAmount = toAmount * targetScalingFactor;
+        uint256 scaledAmount = toAmount * targetScalingFactor; // 缩放后的 amount
 
         // Calculate reward in 18 decimals
-        uint256 rewardAmountIn18Decimals = scaledAmount.mulDiv(rewardPPQ, PPQ_DENOMINATOR);
+        uint256 rewardAmountIn18Decimals = scaledAmount.mulDiv(rewardPPQ, PPQ_DENOMINATOR); // 计算公式相同
 
         // Scale back to reward token decimals
-        return rewardAmountIn18Decimals / rewardScalingFactor;
+        return rewardAmountIn18Decimals / rewardScalingFactor; // 缩放回去
     }
 
     /// @notice Handles token reallocation for campaign participation
@@ -161,13 +166,15 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     /// @param toAmount Expected amount of tokens to be acquired
     /// @param data Additional data for the reallocation
     /// @dev Only callable by SWAP_CALLER_ROLE, handles both ERC20 and native tokens
+    // 由聚合器调用,给用户发 token
+    // 执行时间,比如兑换,兑换完立即发给用户
     function handleReallocation(
-        uint256 campaignId_,
-        address userAddress,
+        uint256 campaignId_, // 用于验证是否是该 campaign
+        address userAddress, // @q-a 未验证 userAddress, 该地址是做什么的 - 每次 partcipent 的用户
         address toToken,
-        uint256 toAmount,
+        uint256 toAmount,    // @audit-i-ok userAddress, toAmount都由链下传入,且只能由SWAP_CALLER_ROLE调用,中心化,不可信,建议 check - 未提交, 因没有奖金
         bytes memory data
-    ) external payable whenNotPaused {
+    ) external payable whenNotPaused { // 只能由 factory 的 SWAP_CALLER_ROLE 调用
         // Check if campaign is active or can be activated
         _validateAndActivateCampaignIfReady();
 
@@ -179,7 +186,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
             revert InvalidToTokenReceived(toToken);
         }
 
-        if (campaignId_ != campaignId) {
+        if (campaignId_ != campaignId) { // 唯一
             revert InvalidCampaignId();
         }
 
@@ -191,22 +198,36 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
                 revert InvalidToTokenReceived(NATIVE_TOKEN);
             }
             IERC20 tokenReceived = IERC20(toToken);
-            uint256 balanceOfSender = tokenReceived.balanceOf(msg.sender);
-            uint256 balanceBefore = getBalanceOfSelf(toToken);
-
+            uint256 balanceOfSender = tokenReceived.balanceOf(msg.sender); //   聚合器 approve 多少，全拿
+            uint256 balanceBefore = getBalanceOfSelf(toToken); // 本合约的余额
+            // @q-a why不按 toAmount 转,而是全部 balanceOfSender - 设计使然
             SafeERC20.safeTransferFrom(tokenReceived, msg.sender, address(this), balanceOfSender);
 
             amountReceived = getBalanceOfSelf(toToken) - balanceBefore;
         }
+        // case 1
+        // balance:  200
+        // approve:  200
+        // toAmount: 100
+        // transfer: 200  -> received: 200
 
-        if (amountReceived < toAmount) {
+        // case 2
+        // balance:  200
+        // approve:  100
+        // toAmount: 100
+        // transfer: 200  -> revert!
+
+        // @q 传入toAmount很大 -> 按amountReceived ,toAmount很小 -> revert
+        if (amountReceived < toAmount) { // 比传参小则 revert
             revert InsufficientAmountReceived();
         }
-
+        // @q-a reentrancy?  SWAP_CALLER_ROLE 特定角色作恶算吗? - 没有必要重入
+        // 转给用户 , token 是 target token
         _transfer(toToken, userAddress, amountReceived);
-
+        
         totalReallocatedAmount += amountReceived;
-
+        // 再给奖励,后续发放
+        // 根据 target token 给予 reward token
         uint256 rewardAmountIncludingFees = getRewardAmountIncludingFees(amountReceived);
 
         uint256 rewardsAvailable = claimableRewardAmount();
@@ -220,11 +241,12 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
 
         pID++;
         // Store the participation details
+        // 记录本次参与
         participations[pID] = Participation({
             status: ParticipationStatus.PARTICIPATING,
             userAddress: userAddress,
             toAmount: amountReceived,
-            rewardAmount: userRewards,
+            rewardAmount: userRewards, // 应该给该用户分发的
             startTimestamp: block.timestamp,
             startBlockNumber: block.number
         });
@@ -237,7 +259,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
         if (!isCampaignActive) {
             // Only auto-activate if campaign has not been manually deactivated
             // and if the start time has been reached
-            if (!_manuallyDeactivated && block.timestamp >= startTimestamp) {
+            if (!_manuallyDeactivated && block.timestamp >= startTimestamp) { // 时间到后又自动激活
                 // Automatically activate the campaign if start time reached
                 isCampaignActive = true;
             } else if (block.timestamp < startTimestamp) {
@@ -257,9 +279,9 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
         if (pIDs.length == 0) {
             revert EmptyParticipationsArray();
         }
-
+        // 合约拥有 ETH 总量
         uint256 availableBalance = getBalanceOfSelf(rewardToken);
-
+        // @q-a dos?很多轮不领取? - 有措施,可分小段领取
         for (uint256 i = 0; i < pIDs.length; i++) {
             Participation storage participation = participations[pIDs[i]];
 
@@ -269,7 +291,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
             }
 
             // Verify that caller is the participation address
-            if (participation.userAddress != msg.sender) {
+            if (participation.userAddress != msg.sender) { // 由用户自己调用
                 revert UnauthorizedCaller(pIDs[i]);
             }
 
@@ -289,9 +311,10 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
             distributedRewards += userRewards;
 
             // Update participation status and transfer rewards
-            participation.status = ParticipationStatus.CLAIMED;
+            participation.status = ParticipationStatus.CLAIMED; // CEI 阻止重入
             availableBalance -= userRewards;
-
+            // @q-a reentrancy -  follow CEI
+            // 给奖励
             _transfer(rewardToken, participation.userAddress, userRewards);
 
             emit NudgeRewardClaimed(pIDs[i], participation.userAddress, userRewards);
@@ -305,6 +328,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     /// @notice Invalidates specified participations
     /// @param pIDs Array of participation IDs to invalidate
     /// @dev Only callable by operator role
+    // 由项目后端调用,判断用户将 target token 提走,即判为 invalid
     function invalidateParticipations(uint256[] calldata pIDs) external onlyNudgeOperator {
         for (uint256 i = 0; i < pIDs.length; i++) {
             Participation storage participation = participations[pIDs[i]];
@@ -314,6 +338,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
             }
 
             participation.status = ParticipationStatus.INVALIDATED;
+            // 如果 invalidate 后, 待支付reward减少, 被扣除了, 这部分钱被team提走?
             pendingRewards -= participation.rewardAmount;
         }
 
@@ -329,7 +354,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
         }
 
         address to = alternativeWithdrawalAddress == address(0) ? msg.sender : alternativeWithdrawalAddress;
-
+        // @q-a reentrancy - 有权限检查
         _transfer(rewardToken, to, amount);
 
         emit RewardsWithdrawn(to, amount);
@@ -339,9 +364,10 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     /// @return feesToCollect Amount of fees collected
     /// @dev Only callable by NudgeCampaignFactory or Nudge admins
     function collectFees() external onlyFactoryOrNudgeAdmin returns (uint256 feesToCollect) {
+        // 将记录的 fee 转去
         feesToCollect = accumulatedFees;
         accumulatedFees = 0;
-
+        // @q-a reentracy - 有权限检查
         _transfer(rewardToken, factory.nudgeTreasuryAddress(), feesToCollect);
 
         emit FeesCollected(feesToCollect);
@@ -386,6 +412,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
 
         amount = getBalanceOfSelf(token);
         if (amount > 0) {
+            // @q-a amount 是全部吗? - yes
             _transfer(token, msg.sender, amount);
             emit TokensRescued(token, amount);
         }
@@ -411,6 +438,7 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     /// @notice Calculates the amount of rewards available for distribution
     /// @return Amount of claimable rewards
     function claimableRewardAmount() public view returns (uint256) {
+        // 本合约拥有的 reward - 待分发的 - 积累的Fees
         return getBalanceOfSelf(rewardToken) - pendingRewards - accumulatedFees;
     }
 
@@ -421,7 +449,8 @@ contract NudgeCampaign is INudgeCampaign, AccessControl {
     function calculateUserRewardsAndFees(
         uint256 rewardAmountIncludingFees
     ) public view returns (uint256 userRewards, uint256 fees) {
-        fees = (rewardAmountIncludingFees * feeBps) / BPS_DENOMINATOR;
+        // @audit-l-ok feeBps可以设置 < 10000, 可以近似 fees = userRewards - 已披露为informational, 无奖励
+        fees = (rewardAmountIncludingFees * feeBps) / BPS_DENOMINATOR; // 费用 = r * fee / BPS_DENOMINATOR
         userRewards = rewardAmountIncludingFees - fees;
     }
 

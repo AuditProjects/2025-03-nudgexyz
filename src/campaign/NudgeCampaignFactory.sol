@@ -20,8 +20,8 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
 
     address public constant NATIVE_TOKEN = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
-    address public nudgeTreasuryAddress;
-    uint16 public FEE_BPS = 1000; // 10% by default
+    address public nudgeTreasuryAddress; // @q-a 用作哪里使用? - 只做了记录并没有使用? - campaign 中将collectFees转给他
+    uint16 public FEE_BPS = 1000; // 10% by default  @q-a 用作哪里计算? - reward 分配占比
 
     // Campaign tracking
     mapping(address => bool) public isCampaign;
@@ -66,15 +66,15 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
     /// @return campaign Address of the deployed campaign contract
     /// @dev Uses Create2 for deterministic address generation
     function deployCampaign(
-        uint32 holdingPeriodInSeconds,
-        address targetToken,
-        address rewardToken,
-        uint256 rewardPPQ,
+        uint32 holdingPeriodInSeconds, // 用户必须持有Token 的时间,才能获得奖励
+        address targetToken, // 持有 token
+        address rewardToken, // 奖励 token
+        uint256 rewardPPQ,   // 奖励系数
         address campaignAdmin,
         uint256 startTimestamp,
-        address alternativeWithdrawalAddress,
+        address alternativeWithdrawalAddress, // @q-a alternativeWithdrawalAddress作用? - 备用金库
         uint256 uuid
-    ) public returns (address campaign) {
+    ) public returns (address campaign) { // @q-a 任何人均可调用? 伪造活动? 滥用UUID? - 地址不同
         if (campaignAdmin == address(0)) revert ZeroAddress();
         if (targetToken == address(0) || rewardToken == address(0)) revert ZeroAddress();
         if (holdingPeriodInSeconds == 0) revert InvalidParameter();
@@ -88,7 +88,7 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
                 rewardPPQ,
                 campaignAdmin,
                 startTimestamp,
-                FEE_BPS,
+                FEE_BPS, // 夹杂一个这
                 alternativeWithdrawalAddress,
                 uuid
             )
@@ -100,7 +100,7 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
             targetToken,
             rewardToken,
             rewardPPQ,
-            campaignAdmin,
+            campaignAdmin, // 指定 campaign admin
             startTimestamp,
             FEE_BPS,
             alternativeWithdrawalAddress,
@@ -108,11 +108,12 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
         );
 
         // Deploy using CREATE2
+        // @q-a hash碰撞? - bytecode 一样不要紧, salt 不一样
         bytes memory bytecode = abi.encodePacked(type(NudgeCampaign).creationCode, constructorArgs);
         campaign = Create2.deploy(0, salt, bytecode);
 
         // Track the campaign
-        isCampaign[campaign] = true;
+        isCampaign[campaign] = true; // 记录 track campaign
         campaignAddresses.push(campaign);
 
         emit CampaignDeployed(campaign, campaignAdmin, targetToken, rewardToken, startTimestamp, uuid);
@@ -138,16 +139,17 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
         address campaignAdmin,
         uint256 startTimestamp,
         address alternativeWithdrawalAddress,
-        uint256 initialRewardAmount,
+        uint256 initialRewardAmount, // 初始化 reward 金额,如是 native token,则要传入相应 ETH
         uint256 uuid
     ) external payable returns (address campaign) {
         if (campaignAdmin == address(0)) revert ZeroAddress();
         if (targetToken == address(0) || rewardToken == address(0)) revert ZeroAddress();
         if (holdingPeriodInSeconds == 0) revert InvalidParameter();
 
-        if (rewardToken == NATIVE_TOKEN) {
+        if (rewardToken == NATIVE_TOKEN) { // 如果是原生 token
             if (msg.value != initialRewardAmount) revert IncorrectEtherAmount();
             // Deploy contract first
+            // 部署
             campaign = deployCampaign(
                 holdingPeriodInSeconds,
                 targetToken,
@@ -159,9 +161,12 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
                 uuid
             );
             // Then send ETH
+            // 发送给 create2 产生的地址
+            // @q-a reentrancy? - campaign合约, 不能重入
             (bool sent, ) = campaign.call{value: initialRewardAmount}("");
             if (!sent) revert NativeTokenTransferFailed();
         } else {
+            // 其他 Token
             if (msg.value > 0) revert IncorrectEtherAmount();
 
             campaign = deployCampaign(
@@ -250,7 +255,7 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
     function updateFeeSetting(uint16 newFeeBps) external onlyRole(NUDGE_ADMIN_ROLE) {
         if (newFeeBps > 10_000) revert InvalidFeeSetting();
 
-        uint16 oldFeeBps = FEE_BPS;
+        uint16 oldFeeBps = FEE_BPS; // 最大值 65535
         FEE_BPS = newFeeBps;
         emit FeeUpdated(oldFeeBps, newFeeBps);
     }
@@ -258,11 +263,13 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
     /// @notice Collects accumulated fees from multiple campaigns
     /// @param campaigns Array of campaign addresses to collect fees from
     /// @dev Only callable by NUDGE_OPERATOR_ROLE
+    // @q-a DoS? - has auth
     function collectFeesFromCampaigns(address[] calldata campaigns) external onlyRole(NUDGE_OPERATOR_ROLE) {
         uint256 totalAmount;
 
         for (uint256 i = 0; i < campaigns.length; i++) {
             if (!isCampaign[campaigns[i]]) revert InvalidCampaign();
+            // 收集每一个 campaign 的 fees
             totalAmount += NudgeCampaign(payable(campaigns[i])).collectFees();
         }
 
@@ -272,10 +279,11 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
     /// @notice Pauses multiple campaigns
     /// @param campaigns Array of campaign addresses to pause
     /// @dev Only callable by NUDGE_ADMIN_ROLE
+    // @q-a DoS? - has auth
     function pauseCampaigns(address[] calldata campaigns) external onlyRole(NUDGE_ADMIN_ROLE) {
         for (uint256 i = 0; i < campaigns.length; i++) {
-            if (!isCampaign[campaigns[i]]) revert InvalidCampaign();
-            if (isCampaignPaused[campaigns[i]]) revert CampaignAlreadyPaused();
+            if (!isCampaign[campaigns[i]]) revert InvalidCampaign(); // @q-a 任意一个失败,则整体失败 - 业务逻辑设计,无妨
+            if (isCampaignPaused[campaigns[i]]) revert CampaignAlreadyPaused(); 
 
             isCampaignPaused[campaigns[i]] = true;
         }
@@ -286,6 +294,7 @@ contract NudgeCampaignFactory is INudgeCampaignFactory, AccessControl {
     /// @notice Unpauses multiple campaigns
     /// @param campaigns Array of campaign addresses to unpause
     /// @dev Only callable by NUDGE_ADMIN_ROLE
+    // @q-a DoS? - has auth
     function unpauseCampaigns(address[] calldata campaigns) external onlyRole(NUDGE_ADMIN_ROLE) {
         for (uint256 i = 0; i < campaigns.length; i++) {
             if (!isCampaign[campaigns[i]]) revert InvalidCampaign();
